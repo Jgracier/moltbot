@@ -25,6 +25,7 @@ import { isGatewayCliClient, isWebchatClient } from "../../../utils/message-chan
 import type { ResolvedGatewayAuth } from "../../auth.js";
 import { authorizeGatewayConnect, isLocalDirectRequest } from "../../auth.js";
 import { loadConfig } from "../../../config/config.js";
+import { generateChallenge, type ScramVerifyState, verifyClientProof } from "../../scram.js";
 import { buildDeviceAuthPayload } from "../../device-auth.js";
 import { isLoopbackAddress, isTrustedProxyAddress, resolveGatewayClientIp } from "../../net.js";
 import { resolveNodeCommandAllowlist } from "../../node-command-policy.js";
@@ -192,6 +193,8 @@ export function attachGatewayWsMessageHandler(params: {
   const configSnapshot = loadConfig();
   const trustedProxies = configSnapshot.gateway?.trustedProxies ?? [];
   const clientIp = resolveGatewayClientIp({ remoteAddr, forwardedFor, realIp, trustedProxies });
+
+  let scramState: ScramVerifyState | null = null;
 
   // If proxy headers are present but the remote address isn't trusted, don't treat
   // the connection as local. This prevents auth bypass when running behind a reverse
@@ -361,6 +364,65 @@ export function attachGatewayWsMessageHandler(params: {
               : [];
         connectParams.role = role;
         connectParams.scopes = scopes;
+
+        // SCRAM-SHA-256: first round — send challenge and wait for clientFinal
+        if (
+          connectParams.auth?.method === "scram" &&
+          typeof connectParams.auth?.clientFirst === "string" &&
+          !scramState
+        ) {
+          if (resolvedAuth.mode !== "token" || !resolvedAuth.token) {
+            setHandshakeState("failed");
+            setCloseCause("scram-not-configured", { client: connectParams.client.id });
+            send({
+              type: "res",
+              id: frame.id,
+              ok: false,
+              error: errorShape(
+                ErrorCodes.INVALID_REQUEST,
+                "gateway auth not token; SCRAM unavailable",
+              ),
+            });
+            close(1008, "SCRAM not configured");
+            return;
+          }
+          const { serverFirst, saltB64, iterations, state } = generateChallenge(
+            resolvedAuth.token,
+            connectParams.auth.clientFirst,
+          );
+          scramState = state;
+          send({
+            type: "event",
+            event: "connect.challenge",
+            payload: { serverFirst, saltB64, iterations },
+          });
+          return;
+        }
+
+        // SCRAM-SHA-256: second round — verify proof and continue as token auth
+        if (
+          scramState &&
+          connectParams.auth?.method === "scram" &&
+          typeof connectParams.auth?.clientFinal === "string"
+        ) {
+          const ok = verifyClientProof(scramState, connectParams.auth.clientFinal);
+          scramState = null;
+          if (!ok) {
+            setHandshakeState("failed");
+            setCloseCause("scram-verify-failed", { client: connectParams.client.id });
+            send({
+              type: "res",
+              id: frame.id,
+              ok: false,
+              error: errorShape(ErrorCodes.INVALID_REQUEST, "SCRAM verification failed"),
+            });
+            close(1008, "SCRAM verification failed");
+            return;
+          }
+          (connectParams as { auth?: { token?: string } }).auth = {
+            token: resolvedAuth.token,
+          };
+        }
 
         const deviceRaw = connectParams.device;
         let devicePublicKey: string | null = null;

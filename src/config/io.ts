@@ -550,10 +550,6 @@ function shouldUseConfigCache(env: NodeJS.ProcessEnv): boolean {
   return resolveConfigCacheMs(env) > 0;
 }
 
-function clearConfigCache(): void {
-  configCache = null;
-}
-
 export function loadConfig(): MoltbotConfig {
   const io = createConfigIO();
   const configPath = io.configPath;
@@ -580,6 +576,10 @@ export function loadConfig(): MoltbotConfig {
 
 export async function readConfigFileSnapshot(): Promise<ConfigFileSnapshot> {
   return await createConfigIO().readConfigFileSnapshot();
+}
+
+export function clearConfigCache(): void {
+  configCache = null;
 }
 
 export async function writeConfigFile(cfg: MoltbotConfig): Promise<void> {

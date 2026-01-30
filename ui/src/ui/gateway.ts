@@ -8,6 +8,7 @@ import {
 import { buildDeviceAuthPayload } from "../../../src/gateway/device-auth.js";
 import { loadOrCreateDeviceIdentity, signDevicePayload } from "./device-identity";
 import { clearDeviceAuthToken, loadDeviceAuthToken, storeDeviceAuthToken } from "./device-auth";
+import { buildClientFirst, computeClientProof } from "./scram-client";
 
 export type GatewayEventFrame = {
   type: "event";
@@ -71,6 +72,10 @@ export class GatewayBrowserClient {
   private connectSent = false;
   private connectTimer: number | null = null;
   private backoffMs = 800;
+  private pendingScramConnect: Pending | null = null;
+  private scramClientFirst: string | null = null;
+  private scramConnectParams: Record<string, unknown> | null = null;
+  private scramSecret: string | null = null;
 
   constructor(private opts: GatewayBrowserClientOptions) {}
 
@@ -147,13 +152,17 @@ export class GatewayBrowserClient {
       authToken = storedToken ?? this.opts.token;
       canFallbackToShared = Boolean(storedToken && this.opts.token);
     }
+    const useScram = isSecureContext && !!authToken && !this.opts.password;
     const auth =
       authToken || this.opts.password
-        ? {
-            token: authToken,
-            password: this.opts.password,
-          }
+        ? useScram
+          ? { method: "scram" as const, clientFirst: buildClientFirst().clientFirst }
+          : { token: authToken, password: this.opts.password }
         : undefined;
+    if (useScram && auth && "clientFirst" in auth) {
+      this.scramClientFirst = auth.clientFirst;
+      this.scramSecret = authToken ?? null;
+    }
 
     let device:
       | {
@@ -206,25 +215,38 @@ export class GatewayBrowserClient {
       locale: navigator.language,
     };
 
-    void this.request<GatewayHelloOk>("connect", params)
-      .then((hello) => {
-        if (hello?.auth?.deviceToken && deviceIdentity) {
-          storeDeviceAuthToken({
-            deviceId: deviceIdentity.deviceId,
-            role: hello.auth.role ?? role,
-            token: hello.auth.deviceToken,
-            scopes: hello.auth.scopes ?? [],
-          });
-        }
-        this.backoffMs = 800;
-        this.opts.onHello?.(hello);
-      })
-      .catch(() => {
-        if (canFallbackToShared && deviceIdentity) {
-          clearDeviceAuthToken({ deviceId: deviceIdentity.deviceId, role });
-        }
-        this.ws?.close(CONNECT_FAILED_CLOSE_CODE, "connect failed");
+    const onHello = (hello: GatewayHelloOk) => {
+      if (hello?.auth?.deviceToken && deviceIdentity) {
+        storeDeviceAuthToken({
+          deviceId: deviceIdentity.deviceId,
+          role: hello.auth.role ?? role,
+          token: hello.auth.deviceToken,
+          scopes: hello.auth.scopes ?? [],
+        });
+      }
+      this.backoffMs = 800;
+      this.opts.onHello?.(hello);
+    };
+    const onConnectFail = () => {
+      if (canFallbackToShared && deviceIdentity) {
+        clearDeviceAuthToken({ deviceId: deviceIdentity.deviceId, role });
+      }
+      this.ws?.close(CONNECT_FAILED_CLOSE_CODE, "connect failed");
+    };
+
+    if (useScram && this.scramClientFirst && this.ws) {
+      this.scramConnectParams = { ...params };
+      const id = generateUUID();
+      const p = new Promise<GatewayHelloOk>((resolve, reject) => {
+        this.pendingScramConnect = { resolve: (v) => resolve(v as GatewayHelloOk), reject };
       });
+      this.ws.send(JSON.stringify({ type: "req", id, method: "connect", params }));
+      void p.then(onHello).catch(onConnectFail);
+    } else {
+      void this.request<GatewayHelloOk>("connect", params)
+        .then(onHello)
+        .catch(onConnectFail);
+    }
   }
 
   private handleMessage(raw: string) {
@@ -239,11 +261,51 @@ export class GatewayBrowserClient {
     if (frame.type === "event") {
       const evt = parsed as GatewayEventFrame;
       if (evt.event === "connect.challenge") {
-        const payload = evt.payload as { nonce?: unknown } | undefined;
-        const nonce = payload && typeof payload.nonce === "string" ? payload.nonce : null;
-        if (nonce) {
-          this.connectNonce = nonce;
-          void this.sendConnect();
+        const payload = evt.payload as {
+          nonce?: string;
+          serverFirst?: string;
+          saltB64?: string;
+          iterations?: number;
+        } | undefined;
+        if (
+          payload &&
+          typeof payload.serverFirst === "string" &&
+          typeof payload.saltB64 === "string" &&
+          typeof payload.iterations === "number" &&
+          this.scramClientFirst &&
+          this.pendingScramConnect &&
+          this.scramConnectParams &&
+          this.ws
+        ) {
+          const clientFirst = this.scramClientFirst;
+          const { serverFirst, saltB64, iterations } = payload;
+          const secret = this.opts.token ?? "";
+          computeClientProof(secret, clientFirst, serverFirst, saltB64, iterations)
+            .then((clientFinal) => {
+              const params2 = {
+                ...this.scramConnectParams,
+                auth: { method: "scram" as const, clientFinal },
+              };
+              const id = generateUUID();
+              this.pending.set(id, this.pendingScramConnect);
+              this.pendingScramConnect = null;
+              this.scramClientFirst = null;
+              this.scramConnectParams = null;
+              this.scramSecret = null;
+              this.ws.send(JSON.stringify({ type: "req", id, method: "connect", params: params2 }));
+            })
+            .catch((err) => {
+              this.pendingScramConnect?.reject(err);
+              this.pendingScramConnect = null;
+              this.scramClientFirst = null;
+              this.scramConnectParams = null;
+            });
+        } else {
+          const nonce = payload && typeof payload.nonce === "string" ? payload.nonce : null;
+          if (nonce) {
+            this.connectNonce = nonce;
+            void this.sendConnect();
+          }
         }
         return;
       }

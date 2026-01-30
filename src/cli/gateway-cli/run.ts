@@ -1,6 +1,7 @@
 import fs from "node:fs";
 
 import type { Command } from "commander";
+import { openUrl, resolveControlUiLinks } from "../../commands/onboard-helpers.js";
 import type { GatewayAuthMode } from "../../config/config.js";
 import {
   CONFIG_PATH,
@@ -10,6 +11,7 @@ import {
 } from "../../config/config.js";
 import { resolveGatewayAuth } from "../../gateway/auth.js";
 import { startGatewayServer } from "../../gateway/server.js";
+import { ensureAndPersistGatewayToken } from "../../gateway/token-management.js";
 import type { GatewayWsLogStyle } from "../../gateway/ws-logging.js";
 import { setGatewayWsLogStyle } from "../../gateway/ws-logging.js";
 import { setVerbose } from "../../globals.js";
@@ -48,11 +50,12 @@ type GatewayRunOpts = {
   rawStreamPath?: unknown;
   dev?: boolean;
   reset?: boolean;
+  openDashboardAfterStart?: boolean;
 };
 
 const gatewayLog = createSubsystemLogger("gateway");
 
-async function runGatewayCommand(opts: GatewayRunOpts) {
+export async function runGatewayCommand(opts: GatewayRunOpts) {
   const isDevProfile = process.env.CLAWDBOT_PROFILE?.trim().toLowerCase() === "dev";
   const devMode = Boolean(opts.dev) || isDevProfile;
   if (opts.reset && !devMode) {
@@ -94,6 +97,7 @@ async function runGatewayCommand(opts: GatewayRunOpts) {
   }
 
   const cfg = loadConfig();
+  await ensureAndPersistGatewayToken(cfg);
   const portOverride = parsePort(opts.port);
   if (opts.port !== undefined && portOverride === null) {
     defaultRuntime.error("Invalid port");
@@ -256,6 +260,7 @@ async function runGatewayCommand(opts: GatewayRunOpts) {
     return;
   }
 
+  const openDashboardAfterStart = Boolean(opts.openDashboardAfterStart);
   try {
     await runGatewayLoop({
       runtime: defaultRuntime,
@@ -278,6 +283,22 @@ async function runGatewayCommand(opts: GatewayRunOpts) {
                 }
               : undefined,
         }),
+      onServerUp: openDashboardAfterStart
+        ? async () => {
+            const c = loadConfig();
+            const links = resolveControlUiLinks({
+              port,
+              bind: "loopback",
+              customBindHost: c.gateway?.customBindHost,
+              basePath: c.gateway?.controlUi?.basePath,
+            });
+            const token = c.gateway?.auth?.token ?? "";
+            const url = token
+              ? `${links.httpUrl}?token=${encodeURIComponent(token)}`
+              : links.httpUrl;
+            await openUrl(url);
+          }
+        : undefined,
     });
   } catch (err) {
     if (

@@ -1,14 +1,45 @@
 import type { Command } from "commander";
+import { openUrl, resolveControlUiLinks } from "../../commands/onboard-helpers.js";
 import { dashboardCommand } from "../../commands/dashboard.js";
 import { doctorCommand } from "../../commands/doctor.js";
 import { resetCommand } from "../../commands/reset.js";
 import { uninstallCommand } from "../../commands/uninstall.js";
+import { loadConfig, resolveGatewayPort } from "../../config/config.js";
+import { ensureAndPersistGatewayToken } from "../../gateway/token-management.js";
 import { defaultRuntime } from "../../runtime.js";
 import { formatDocsLink } from "../../terminal/links.js";
 import { theme } from "../../terminal/theme.js";
+import { runGatewayCommand } from "../gateway-cli/run.js";
 import { runCommandWithRuntime } from "../cli-utils.js";
 
 export function registerMaintenanceCommands(program: Command) {
+  program
+    .command("start")
+    .description("Ensure gateway token, run the gateway, and open the Control UI")
+    .addHelpText(
+      "after",
+      () => `\n${theme.muted("Docs:")} ${formatDocsLink("/start", "docs.molt.bot/start")}\n`,
+    )
+    .action(async () => {
+      await runCommandWithRuntime(defaultRuntime, async () => {
+        const cfg = loadConfig();
+        await ensureAndPersistGatewayToken(cfg);
+        const port = resolveGatewayPort(cfg);
+        const links = resolveControlUiLinks({
+          port,
+          bind: "loopback",
+          customBindHost: cfg.gateway?.customBindHost,
+          basePath: cfg.gateway?.controlUi?.basePath,
+        });
+        const token = cfg.gateway?.auth?.token ?? "";
+        const dashboardUrl = token
+          ? `${links.httpUrl}?token=${encodeURIComponent(token)}`
+          : links.httpUrl;
+        await openUrl(dashboardUrl);
+        await runGatewayCommand({ openDashboardAfterStart: false });
+      });
+    });
+
   program
     .command("doctor")
     .description("Health checks + quick fixes for the gateway and channels")

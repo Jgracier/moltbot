@@ -3,7 +3,8 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import type { MoltbotConfig } from "../config/config.js";
+import { clearConfigCache, loadConfig, type MoltbotConfig } from "../config/config.js";
+import { isLocalDirectRequest } from "./auth.js";
 import { DEFAULT_ASSISTANT_IDENTITY, resolveAssistantIdentity } from "./assistant-identity.js";
 import {
   buildControlUiAvatarUrl,
@@ -234,6 +235,44 @@ function isSafeRelativePath(relPath: string) {
   return true;
 }
 
+/** If request is from localhost and URL has no token but we have one, redirect to add token so the UI can auto-connect. */
+function maybeRedirectLocalhostWithToken(
+  req: IncomingMessage,
+  res: ServerResponse,
+  url: URL,
+  pathname: string,
+  basePath: string | undefined,
+  config: MoltbotConfig | undefined,
+): boolean {
+  const trustedProxies = config?.gateway?.trustedProxies ?? [];
+  if (!isLocalDirectRequest(req, trustedProxies)) return false;
+  let token =
+    (typeof config?.gateway?.auth?.token === "string" && config.gateway.auth.token.trim()
+      ? config.gateway.auth.token.trim()
+      : undefined) ??
+    (typeof process.env.CLAWDBOT_GATEWAY_TOKEN === "string" &&
+    process.env.CLAWDBOT_GATEWAY_TOKEN.trim()
+      ? process.env.CLAWDBOT_GATEWAY_TOKEN.trim()
+      : undefined);
+  if (!token) {
+    clearConfigCache();
+    const fresh = loadConfig();
+    token =
+      (typeof fresh.gateway?.auth?.token === "string" && fresh.gateway.auth.token.trim()
+        ? fresh.gateway.auth.token.trim()
+        : undefined) ??
+      process.env.CLAWDBOT_GATEWAY_TOKEN?.trim() ??
+      undefined;
+  }
+  if (!token || url.searchParams.has("token")) return false;
+  url.searchParams.set("token", token);
+  const location = (basePath ?? "") + pathname + "?" + url.searchParams.toString();
+  res.statusCode = 302;
+  res.setHeader("Location", location);
+  res.end();
+  return true;
+}
+
 export function handleControlUiHttpRequest(
   req: IncomingMessage,
   res: ServerResponse,
@@ -302,6 +341,9 @@ export function handleControlUiHttpRequest(
 
   if (fs.existsSync(filePath) && fs.statSync(filePath).isFile()) {
     if (path.basename(filePath) === "index.html") {
+      if (maybeRedirectLocalhostWithToken(req, res, url, pathname, basePath, opts?.config)) {
+        return true;
+      }
       serveIndexHtml(res, filePath, {
         basePath,
         config: opts?.config,
@@ -316,6 +358,9 @@ export function handleControlUiHttpRequest(
   // SPA fallback (client-side router): serve index.html for unknown paths.
   const indexPath = path.join(root, "index.html");
   if (fs.existsSync(indexPath)) {
+    if (maybeRedirectLocalhostWithToken(req, res, url, pathname, basePath, opts?.config)) {
+      return true;
+    }
     serveIndexHtml(res, indexPath, {
       basePath,
       config: opts?.config,

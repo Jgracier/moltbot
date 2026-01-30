@@ -57,6 +57,10 @@ export const ConnectParamsSchema = Type.Object(
         {
           token: Type.Optional(Type.String()),
           password: Type.Optional(Type.String()),
+          /** SCRAM-SHA-256: method "scram" with clientFirst (first round) or clientFinal (second round). */
+          method: Type.Optional(Type.Literal("scram")),
+          clientFirst: Type.Optional(Type.String()),
+          clientFinal: Type.Optional(Type.String()),
         },
         { additionalProperties: false },
       ),

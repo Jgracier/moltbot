@@ -13,6 +13,7 @@ import {
   readConfigFileSnapshot,
   writeConfigFile,
 } from "../config/config.js";
+import { ensureControlUiAssetsBuilt } from "../infra/control-ui-assets.js";
 import { isDiagnosticsEnabled } from "../infra/diagnostic-events.js";
 import { logAcceptedEnvOption } from "../infra/env.js";
 import { applyPluginAutoEnable } from "../config/plugin-auto-enable.js";
@@ -259,6 +260,15 @@ export async function startGatewayServer(
   } = runtimeConfig;
   let hooksConfig = runtimeConfig.hooksConfig;
   const canvasHostEnabled = runtimeConfig.canvasHostEnabled;
+
+  if (controlUiEnabled) {
+    const uiResult = await ensureControlUiAssetsBuilt(runtimeForLogger(log), {
+      timeoutMs: 10 * 60_000,
+    });
+    if (!uiResult.ok && uiResult.message) {
+      log.warn(uiResult.message);
+    }
+  }
 
   const wizardRunner = opts.wizardRunner ?? runOnboardingWizard;
   const { wizardSessions, findRunningWizard, purgeWizardSession } = createWizardSessionTracker();

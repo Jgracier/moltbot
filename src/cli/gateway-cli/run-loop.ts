@@ -14,11 +14,14 @@ type GatewayRunSignalAction = "stop" | "restart";
 export async function runGatewayLoop(params: {
   start: () => Promise<Awaited<ReturnType<typeof startGatewayServer>>>;
   runtime: typeof defaultRuntime;
+  /** Called once after the server has started (e.g. to open the Control UI in the browser). */
+  onServerUp?: () => void | Promise<void>;
 }) {
   const lock = await acquireGatewayLock();
   let server: Awaited<ReturnType<typeof startGatewayServer>> | null = null;
   let shuttingDown = false;
   let restartResolver: (() => void) | null = null;
+  let didRunOnServerUp = false;
 
   const cleanupSignals = () => {
     process.removeListener("SIGTERM", onSigterm);
@@ -93,6 +96,10 @@ export async function runGatewayLoop(params: {
     // eslint-disable-next-line no-constant-condition
     while (true) {
       server = await params.start();
+      if (params.onServerUp && !didRunOnServerUp) {
+        didRunOnServerUp = true;
+        await params.onServerUp();
+      }
       await new Promise<void>((resolve) => {
         restartResolver = resolve;
       });
