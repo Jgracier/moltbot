@@ -7,7 +7,7 @@ import {
 } from "../../../src/gateway/protocol/client-info.js";
 import { buildDeviceAuthPayload } from "../../../src/gateway/device-auth.js";
 import { loadOrCreateDeviceIdentity, signDevicePayload } from "./device-identity";
-import { clearDeviceAuthToken, loadDeviceAuthToken, storeDeviceAuthToken } from "./device-auth";
+import { storeDeviceAuthToken } from "./device-auth";
 import { buildClientFirst, computeClientProof } from "./scram-client";
 
 export type GatewayEventFrame = {
@@ -139,18 +139,12 @@ export class GatewayBrowserClient {
 
     const scopes = ["operator.admin", "operator.approvals", "operator.pairing"];
     const role = "operator";
+    // Use only the shared (settings) token for connect so SCRAM always matches the gateway secret.
+    // Stored device tokens are not used for connect; avoids 401 after gateway restart.
+    const authToken = this.opts.token;
     let deviceIdentity: Awaited<ReturnType<typeof loadOrCreateDeviceIdentity>> | null = null;
-    let canFallbackToShared = false;
-    let authToken = this.opts.token;
-
     if (isSecureContext) {
       deviceIdentity = await loadOrCreateDeviceIdentity();
-      const storedToken = loadDeviceAuthToken({
-        deviceId: deviceIdentity.deviceId,
-        role,
-      })?.token;
-      authToken = storedToken ?? this.opts.token;
-      canFallbackToShared = Boolean(storedToken && this.opts.token);
     }
     const useScram = isSecureContext && !!authToken && !this.opts.password;
     const auth =
@@ -228,9 +222,6 @@ export class GatewayBrowserClient {
       this.opts.onHello?.(hello);
     };
     const onConnectFail = () => {
-      if (canFallbackToShared && deviceIdentity) {
-        clearDeviceAuthToken({ deviceId: deviceIdentity.deviceId, role });
-      }
       this.ws?.close(CONNECT_FAILED_CLOSE_CODE, "connect failed");
     };
 
